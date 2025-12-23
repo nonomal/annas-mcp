@@ -24,14 +24,42 @@ const (
 )
 
 func extractMetaInformation(meta string) (language, format, size string) {
-	parts := strings.Split(meta, ", ")
-	if len(parts) < 5 {
+	// The meta format may be:
+	// - "✅ English [en] · EPUB · 0.7MB · 2015 · ..."
+	// - "✅ English [en] · Hindi [hi] · EPUB · 0.7MB · ..."
+	parts := strings.Split(meta, " · ")
+	if len(parts) < 3 {
 		return "", "", ""
 	}
 
-	language = parts[0]
-	format = parts[1]
-	size = parts[3]
+	languagePart := strings.TrimSpace(parts[0])
+	if idx := strings.Index(languagePart, "["); idx > 0 {
+		language = strings.TrimSpace(languagePart[:idx])
+		language = strings.TrimLeft(language, "✅ ")
+	}
+
+	// Format is typically all caps (EPUB, PDF, MOBI, etc.). Size contains MB, KB, GB.
+	formatIdx := -1
+	sizeIdx := -1
+
+	for i := 1; i < len(parts); i++ {
+		part := strings.TrimSpace(parts[i])
+		if strings.Contains(part, "MB") || strings.Contains(part, "KB") || strings.Contains(part, "GB") {
+			sizeIdx = i
+			if formatIdx == -1 && i > 0 {
+				formatIdx = i - 1
+			}
+			break
+		}
+	}
+
+	if formatIdx > 0 && formatIdx < len(parts) {
+		format = strings.TrimSpace(parts[formatIdx])
+	}
+
+	if sizeIdx > 0 && sizeIdx < len(parts) {
+		size = strings.TrimSpace(parts[sizeIdx])
+	}
 
 	return language, format, size
 }
@@ -45,8 +73,9 @@ func FindBook(query string) ([]*Book, error) {
 
 	bookList := make([]*colly.HTMLElement, 0)
 
-	c.OnHTML("a", func(e *colly.HTMLElement) {
-		if strings.Index(e.Attr("href"), "/md5/") == 0 {
+	c.OnHTML("a[href^='/md5/']", func(e *colly.HTMLElement) {
+		// Only process the first link (the cover image link), not the duplicate title link
+		if e.Attr("class") == "custom-a block mr-2 sm:mr-4 hover:opacity-80" {
 			bookList = append(bookList, e)
 		}
 	})
@@ -61,10 +90,17 @@ func FindBook(query string) ([]*Book, error) {
 
 	bookListParsed := make([]*Book, 0)
 	for _, e := range bookList {
-		meta := e.DOM.Parent().Find("div.relative.top-\\[-1\\].pl-4.grow.overflow-hidden > div").Eq(0).Text()
-		title := e.DOM.Parent().Find("div.relative.top-\\[-1\\].pl-4.grow.overflow-hidden > h3").Text()
-		publisher := e.DOM.Parent().Find("div.relative.top-\\[-1\\].pl-4.grow.overflow-hidden > div").Eq(1).Text()
-		authors := e.DOM.Parent().Find("div.relative.top-\\[-1\\].pl-4.grow.overflow-hidden > div").Eq(2).Text()
+		bookInfoDiv := e.DOM.Parent().Find("div.max-w-full")
+
+		title := bookInfoDiv.Find("a[href^='/md5/']").Text()
+
+		authorsRaw := bookInfoDiv.Find("a[href^='/search'] span.icon-\\[mdi--user-edit\\]").Parent().Text()
+		authors := strings.TrimSpace(authorsRaw)
+
+		publisherRaw := bookInfoDiv.Find("a[href^='/search'] span.icon-\\[mdi--company\\]").Parent().Text()
+		publisher := strings.TrimSpace(publisherRaw)
+
+		meta := bookInfoDiv.Find("div.text-gray-800").Text()
 
 		language, format, size := extractMetaInformation(meta)
 
@@ -72,12 +108,12 @@ func FindBook(query string) ([]*Book, error) {
 		hash := strings.TrimPrefix(link, "/md5/")
 
 		book := &Book{
-			Language:  strings.TrimSpace(language),
-			Format:    strings.TrimSpace(format)[1:],
-			Size:      strings.TrimSpace(size),
+			Language:  language,
+			Format:    format,
+			Size:      size,
 			Title:     strings.TrimSpace(title),
-			Publisher: strings.TrimSpace(publisher),
-			Authors:   strings.TrimSpace(authors),
+			Publisher: publisher,
+			Authors:   authors,
 			URL:       e.Request.AbsoluteURL(link),
 			Hash:      hash,
 		}
